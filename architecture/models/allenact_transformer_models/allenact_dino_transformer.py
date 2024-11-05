@@ -268,10 +268,14 @@ class DinoLLAMATxNavActorCritic(VisualNavActorCritic):
         Tuple of the `ActorCriticOutput` and recurrent hidden state.
         """
 
+        ###
         # 1.1 use perception model (i.e. encoder) to get observation embeddings
+        ###
         obs_embeds, text_feats = self.forward_encoder(observations)
 
+        ###
         # 1.2 use embedding model to get prev_action embeddings
+        ###
         if self.prev_action_embedder.input_size == self.action_space.n + 1:
             # In this case we have a unique embedding for the start of an episode
             prev_actions_embeds = self.prev_action_embedder(
@@ -286,27 +290,31 @@ class DinoLLAMATxNavActorCritic(VisualNavActorCritic):
 
         joint_embeds = obs_embeds + prev_actions_embeds
 
+        ###
         # 2. use Transformers to get single/multiple beliefs
+        ###
         beliefs_input_dict = {}
+        # 2.1 prepare input for each belief model via linear projection
         for key, model in self.state_encoders_linear.items():
             beliefs_input_dict[key] = model(joint_embeds)
+        # 2.2 add positional encoding
         for key, model in self.state_encoders_time.items():
             beliefs_input_dict[key] = (
                 model(observations[self.time_step_uuid]) + beliefs_input_dict[key]
             )
-        memory_input_dict = {}
-        if self.goal_sensor_uuid is not None:
-            for key, model in self.state_encoders_text.items():
-                memory_input_dict[key] = model(text_feats)
+        # 2.3 causal transformer decoder to get beliefs
         beliefs_dict = {}
         for key, model in self.state_encoders.items():
+            # reset time step counter 1) if there are multiple time steps in the input,
+            # indicating it is at the update stage; and 2) if the max_steps is reached
             if joint_embeds.shape[0] > 1 or self.time_step_counter >= self.max_steps:
                 self.time_step_counter = 0
-                # self.done_action_idx = []
             x = beliefs_input_dict[key].permute(1, 0, 2)
             if self.traj_idx_uuid is None:
+                # no dynamic attention causal mask as the trajectory index is not available
                 mask = None
             elif joint_embeds.shape[0] == 1:
+                # construct dynamic attention causal mask for single time step input (rollout stage)
                 timesteps = observations[self.time_step_uuid].permute(1, 0)  # bs, nsteps
                 epi_start = torch.clamp(self.time_step_counter - timesteps, min=0).expand(
                     -1, self.time_step_counter + 1
@@ -315,19 +323,25 @@ class DinoLLAMATxNavActorCritic(VisualNavActorCritic):
 
                 mask = (epi_start <= step_range).unsqueeze(1).unsqueeze(1)
             else:
+                # construct dynamic attention causal mask for multiple time steps input (update stage)
                 traj_idx: torch.Tensor = observations[self.traj_idx_uuid].permute(1, 0)
                 mask = traj_idx[:, :, None] == traj_idx[:, None, :]
                 mask = torch.tril(mask)
                 mask = mask.unsqueeze(1)  # type: ignore
+            # forward causal transformer decoder
             y = model(x, self.time_step_counter, mask)
             beliefs_dict[key] = y.permute(1, 0, 2)
             if joint_embeds.shape[0] == 1:
                 self.time_step_counter += 1
 
+        ###
         # 3. fuse beliefs for multiple belief models
+        ###
         beliefs, task_weights = self.fuse_beliefs(beliefs_dict, obs_embeds)  # fused beliefs
 
+        ###
         # 4. prepare output
+        ###
         extras = (
             {
                 aux_uuid: {

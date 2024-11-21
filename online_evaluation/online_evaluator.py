@@ -404,8 +404,9 @@ class OnlineEvaluatorManager:
 
         max_houses_per_split[subset_to_load] = int(1e9)
         return prior.load_dataset(
-            "procthor-objaverse-internal",
-            revision="local",
+            dataset="spoc-data",
+            entity="spoc-robot",
+            revision="local-objaverse-procthor-houses",
             path_to_splits=None,
             split_to_path={
                 k: os.path.join(OBJAVERSE_HOUSES_DIR, f"{k}.jsonl.gz")
